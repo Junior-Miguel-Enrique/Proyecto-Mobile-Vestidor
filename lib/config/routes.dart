@@ -1,0 +1,16 @@
+/// Definición de rutas de la aplicación
+class AppRoutes {
+  static const String login = '/login';
+  static const String register = '/register';
+  static const String home = '/home';
+  static const String catalog = '/catalog';
+  static const String cart = '/cart';
+  static const String reservations = '/reservations';
+  static const String purchases = '/purchases';
+  static const String branches = '/branches';
+  static const String virtualFitting = '/virtual-fitting';
+  static const String offlineSync = '/offline-sync';
+  static const String chatbot = '/chatbot';
+  static const String wallet = '/wallet';
+  static const String favorites = '/favorites';
+}

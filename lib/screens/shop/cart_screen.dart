@@ -1,0 +1,1703 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../config/theme.dart';
+import '../../models/branch.dart';
+import '../../services/branch_service.dart';
+import '../../services/cart_service.dart';
+import '../../services/reservation_service.dart';
+import '../../services/paypal_service.dart';
+import '../../services/auth_service.dart';
+import '../../services/local_notification_service.dart';
+import '../../core/services/connectivity_service.dart';
+import '../../core/services/offline_sync_service.dart';
+import '../../core/database/database_helper.dart';
+import '../../utils/url_helper.dart';
+import '../../services/wallet_service.dart';
+import '../../services/api_service.dart';
+import '../../config/api_config.dart';
+import '../wallet/wallet_screen.dart';
+
+class CartScreen extends StatefulWidget {
+  const CartScreen({super.key});
+
+  @override
+  State<CartScreen> createState() => _CartScreenState();
+}
+
+class _CartScreenState extends State<CartScreen> {
+  List<Branch> _branches = [];
+  bool _isLoadingBranches = true;
+  bool _isSubmitting = false;
+  bool _checkoutRunning = false;
+  int? _couponRevision;
+
+  final TextEditingController _couponController = TextEditingController();
+  String? _appliedCouponCode;
+  double _couponDiscount = 0.0;
+  bool _isValidatingCoupon = false;
+
+  void _invalidateStaleCoupon() {
+    if(_appliedCouponCode!=null && _couponRevision!=context.read<CartService>().revision) {
+      _appliedCouponCode=null;_couponDiscount=0;_couponRevision=null;
+    }
+  }
+
+  Future<void> _runCheckout(Future<void> Function() action) async {
+    if(_checkoutRunning) return;
+    _checkoutRunning=true;
+    _invalidateStaleCoupon();
+    try { await action(); }
+    catch(e) {
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('No se completó la operación: $e')));
+    } finally {
+      _checkoutRunning=false;
+      if(mounted) setState(()=>_isSubmitting=false);
+    }
+  }
+
+  Future<void> _handleConfirmReservation()=>_runCheckout(_performReservation);
+  Future<void> _handleWalletPayment()=>_runCheckout(_performWalletPayment);
+  Future<void> _handleDirectPurchase()=>_runCheckout(_performDirectPurchase);
+
+  double _getFinalTotal(double cartTotal) {
+    _invalidateStaleCoupon();
+    return (cartTotal - _couponDiscount).clamp(0.0, double.infinity);
+  }
+
+  Future<void> _applyCoupon() async {
+    final code = _couponController.text.trim().toUpperCase();
+    if (code.isEmpty || _isValidatingCoupon || _checkoutRunning) return;
+
+    setState(() => _isValidatingCoupon = true);
+    final api = context.read<ApiService>();
+    final cart = context.read<CartService>();
+    final revision=cart.revision;final scope=DatabaseHelper.scope;
+
+    try {
+      final res = await api.postAuth('${ApiConfig.apiUrl}/coupons/validate', {
+        'codigo': code,
+        'monto_subtotal': cart.subtotal,
+      });
+
+      if(!mounted || scope!=DatabaseHelper.scope) return;
+      if(revision!=cart.revision) { setState(()=>_isValidatingCoupon=false); return; }
+      if (res.success && res.data != null) {
+        final data = res.data as Map<String, dynamic>;
+        final bool valido = data['valido'] == true;
+        if (valido) {
+          final desc=double.tryParse(data['monto_descuento'].toString());
+          if(desc==null || !desc.isFinite || desc<0 || desc>cart.subtotal) throw const FormatException('Descuento inválido');
+          setState(() {
+            _appliedCouponCode = code;
+            _couponRevision=revision;
+            _couponDiscount = desc;
+            _isValidatingCoupon = false;
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(data['mensaje']?.toString() ?? 'Cupón aplicado'),
+                backgroundColor: AppTheme.successColor,
+              ),
+            );
+          }
+          return;
+        } else {
+          setState(() => _isValidatingCoupon = false);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(data['mensaje']?.toString() ?? 'Cupón no válido'),
+                backgroundColor: AppTheme.errorColor,
+              ),
+            );
+          }
+          return;
+        }
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    setState(() => _isValidatingCoupon = false);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+      content: Text('Conéctate para validar el cupón; no se aplicó ningún descuento.'),
+      backgroundColor: AppTheme.errorColor,
+    ));
+  }
+
+  @override
+  void dispose() {
+    _couponController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBranches();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<WalletService>().fetchWallet(silent: true);
+      unawaited(context.read<WalletService>().fetchPayPalAvailability());
+    });
+  }
+
+  Future<void> _loadBranches() async {
+    final owner=DatabaseHelper.scope;
+    if(owner==null) return;
+    final db=DatabaseHelper.instance.forScope(owner);
+    try {
+      final service = context.read<BranchService>();
+      final branches = await service.getBranches();
+      if(!mounted || owner!=DatabaseHelper.scope) return;
+      if (mounted) {
+        setState(() {
+          _branches = branches;
+          _isLoadingBranches = false;
+        });
+        final cart = context.read<CartService>();
+        if (cart.selectedBranch == null && branches.isNotEmpty) {
+          cart.setSelectedBranch(branches.first);
+        }
+      }
+
+      // Cachear en SQLite solo si hay sucursales válidas
+      if (branches.isNotEmpty) {
+        try {
+          await db.cacheBranches(branches.map((b) => {
+            'id': b.id,
+            'nombre': b.nombre,
+            'ciudad': b.ciudad,
+            'direccion': b.direccion,
+            'activa': b.activa ? 1 : 0,
+          }).toList());
+        } catch (_) {}
+      } else {
+        // Si la lista vino vacía, intentar restaurar de SQLite
+        await _restoreBranchesFromCache();
+      }
+    } catch (_) {
+      await _restoreBranchesFromCache();
+    }
+  }
+
+  Future<void> _restoreBranchesFromCache() async {
+    final owner=DatabaseHelper.scope;
+    if(owner==null) return;
+    final db=DatabaseHelper.instance.forScope(owner);
+    try {
+      final cached = await db.getCachedBranches();
+      if(!mounted || owner!=DatabaseHelper.scope) return;
+      if (cached.isNotEmpty && mounted) {
+        final fallbackBranches = cached.map((c) => Branch(
+          id: c['id'] as String,
+          nombre: c['nombre'] as String,
+          ciudad: c['ciudad'] as String? ?? '',
+          direccion: c['direccion'] as String? ?? '',
+          activa: (c['activa'] == 1),
+        )).toList();
+
+        setState(() {
+          _branches = fallbackBranches;
+          _isLoadingBranches = false;
+        });
+        final cart = context.read<CartService>();
+        if (cart.selectedBranch == null && fallbackBranches.isNotEmpty) {
+          cart.setSelectedBranch(fallbackBranches.first);
+        }
+        return;
+      }
+    } catch (_) {}
+
+    if (mounted) {
+      setState(() {
+        _isLoadingBranches = false;
+      });
+    }
+  }
+
+  Future<void> _performReservation() async {
+    final owner=DatabaseHelper.scope;
+    final cart = context.read<CartService>();
+    if (cart.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El carrito está vacío'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    if (cart.selectedBranch == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor selecciona una sucursal para recoger tu pedido'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    // ── MODO OFFLINE FIRST EN MÓVIL (SQLITE) ──
+    final connectivity = context.read<ConnectivityService>();
+    if (!connectivity.isOnline) {
+      final syncService = context.read<OfflineSyncService>();
+      final clientOpId = await syncService.saveOfflineReservation(
+        sucursalId: cart.selectedBranch!.id,
+        items: cart.items.map((item) => {
+          'variante_id': item.variant.id,
+          'cantidad': item.quantity,
+          'precio_unitario': item.unitPrice,
+        }).toList(),
+        montoTotal: cart.total,
+      );
+
+      if(!mounted || owner!=DatabaseHelper.scope) return;
+      cart.clearCart();
+      setState(() => _isSubmitting = false);
+
+      if (mounted) {
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppTheme.getCardBg(ctx),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppTheme.borderRadiusLarge),
+            ),
+            title: Row(
+              children: [
+                const Icon(Icons.offline_pin_rounded, color: Colors.amber, size: 28),
+                const SizedBox(width: 10),
+                Text(
+                  '¡Reserva Guardada Offline!',
+                  style: TextStyle(
+                    color: AppTheme.getTextPrimary(ctx),
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Sin conexión al servidor central. Tu reserva ha sido guardada de forma segura en la base de datos local SQLite de tu dispositivo móvil.',
+                  style: TextStyle(color: AppTheme.getTextSecondary(ctx)),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'ID Operación: ${clientOpId.substring(0, 8).toUpperCase()}',
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.amber),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Se sincronizará automáticamente al restablecerse la conectividad a Internet.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Entendido', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      final resService = context.read<ReservationService>();
+      final items = cart.items
+          .map((item) => {
+                'variante_id': item.variant.id,
+                'cantidad': item.quantity,
+              })
+          .toList();
+
+      final response = await resService.createReservation(
+        sucursalId: cart.selectedBranch!.id,
+        items: items,
+      );
+
+      if (mounted && owner==DatabaseHelper.scope) {
+        setState(() => _isSubmitting = false);
+        if (response.success) {
+          final resData = response.data as Map<String, dynamic>?;
+          final numeroReserva = resData?['codigo'] ?? resData?['numero_reserva'] ?? 'RES-CONFIRMADA';
+
+          cart.clearCart();
+
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: AppTheme.getCardBg(ctx),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppTheme.borderRadiusLarge),
+              ),
+              title: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: AppTheme.successColor, size: 28),
+                  const SizedBox(width: 10),
+                  Text(
+                    '¡Reserva Creada!',
+                    style: TextStyle(
+                      color: AppTheme.getTextPrimary(ctx),
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Tu pedido ha sido apartado exitosamente bajo el código:',
+                    style: TextStyle(color: AppTheme.getTextSecondary(ctx), fontSize: 13),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: AppTheme.getAccent(ctx).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppTheme.getAccent(ctx).withValues(alpha: 0.3)),
+                    ),
+                    child: Center(
+                      child: Text(
+                        numeroReserva,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: AppTheme.getAccent(ctx),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Puedes pasar a retirarlo y pagarlo en mostrador en la sucursal seleccionada.',
+                    style: TextStyle(color: AppTheme.getTextSecondary(ctx), fontSize: 12),
+                  ),
+                ],
+              ),
+              actions: [
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx); // Cierra dialog
+                    Navigator.pop(context); // Cierra CartScreen
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.getAccent(ctx),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  child: const Text('Entendido'),
+                ),
+              ],
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(response.message ?? response.error ?? 'Error al procesar reserva'),
+              backgroundColor: AppTheme.errorColor,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error inesperado: ${e.toString()}'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _performWalletPayment() async {
+    final owner=DatabaseHelper.scope;
+    final cart = context.read<CartService>();
+    final walletService = context.read<WalletService>();
+
+    if (cart.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El carrito está vacío'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    if (cart.selectedBranch == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor selecciona una sucursal para despachar tu compra'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    final total = _getFinalTotal(cart.total);
+    final saldoActual = walletService.saldo;
+
+    if (saldoActual < total) {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.getCardBg(ctx),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: const [
+              Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
+              SizedBox(width: 10),
+              Text('Saldo Insuficiente', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Tu saldo en la Billetera Virtual es de Bs. ${saldoActual.toStringAsFixed(2)}, pero el total de tu carrito es Bs. ${total.toStringAsFixed(2)}.',
+                style: TextStyle(color: AppTheme.getTextSecondary(ctx)),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Faltan: Bs. ${(total - saldoActual).toStringAsFixed(2)}',
+                style: const TextStyle(fontWeight: FontWeight.bold, color: AppTheme.errorColor),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Puedes recargar saldo mediante PayPal o pagar en efectivo directamente en caja.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Volver'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const WalletScreen()),
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF0070BA),
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('Recargar Billetera'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    // Modal de confirmación de débito
+    final isOnline = context.read<ConnectivityService>().isOnline;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.getCardBg(ctx),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0070BA).withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF0070BA), size: 24),
+            ),
+            const SizedBox(width: 10),
+            const Text('Confirmar Pago', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '¿Deseas pagar esta orden debitando directamente de tus fondos prepago de la Billetera Virtual?',
+              style: TextStyle(color: AppTheme.getTextSecondary(ctx)),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppTheme.getBg(ctx),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppTheme.getBorder(ctx)),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Total a Descontar:', style: TextStyle(fontSize: 13)),
+                      Text('Bs. ${total.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF0070BA))),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Saldo Restante:', style: TextStyle(fontSize: 13)),
+                      Text('Bs. ${(saldoActual - total).toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: AppTheme.successColor)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Icon(
+                  isOnline ? Icons.wifi_rounded : Icons.wifi_off_rounded,
+                  size: 16,
+                  color: isOnline ? Colors.green : Colors.amber,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isOnline
+                        ? 'Modo Online: Se sincronizará inmediatamente con el servidor central.'
+                        : 'Modo Offline: Se descontará de tu SQLite local seguro y se sincronizará al volver la red.',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isOnline ? Colors.green : Colors.amber,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0070BA),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Autorizar Pago'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted || owner!=DatabaseHelper.scope || confirmed != true) return;
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      final items = cart.items.map((i) => {
+        'variante_id': i.variant.id,
+        'cantidad': i.quantity,
+        'precio_unitario': i.unitPrice,
+        'nombre': '${i.product.nombre} (${i.variant.talla}/${i.variant.color})',
+      }).toList();
+
+      final result = await walletService.payWithWallet(
+        sucursalId: cart.selectedBranch!.id,
+        items: items,
+        totalAmount: total,
+        codigoCupon: _appliedCouponCode,
+      );
+
+      if(!mounted || owner!=DatabaseHelper.scope) return;
+      if (result['success'] != true) {
+        throw Exception(result['error'] ?? 'La compra no fue confirmada');
+      }
+      final clientOpId = result['client_operation_id']?.toString() ?? 'OP-WALLET';
+      final isOfflineQueued = result['offline_queued'] == true;
+
+      cart.clearCart();
+      setState(() => _isSubmitting = false);
+
+      unawaited(LocalNotificationService.showNotification(
+        title: isOfflineQueued ? '¡Pago Offline con Billetera!' : '¡Compra con Billetera Confirmada!',
+        body: isOfflineQueued ? 'Compra guardada para confirmar al reconectar. Importe reservado localmente: Bs. ${total.toStringAsFixed(2)}.' : 'Compra confirmada por el servidor: Bs. ${total.toStringAsFixed(2)}.',
+      ));
+
+      if (!mounted) return;
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.getCardBg(ctx),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              const Icon(Icons.check_circle_rounded, color: AppTheme.successColor, size: 28),
+              const SizedBox(width: 10),
+              Text(
+                isOfflineQueued ? '¡Pago Offline Guardado!' : '¡Compra Exitosa!',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                isOfflineQueued
+                    ? 'Tu compra quedó pendiente de confirmación del servidor. El importe está reservado localmente y se enviará al recuperar la conexión.'
+                    : 'Tu compra ha sido procesada y registrada en el servidor central.',
+                style: TextStyle(color: AppTheme.getTextSecondary(ctx)),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0070BA).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFF0070BA).withValues(alpha: 0.3)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Operación: #${clientOpId.length >= 8 ? clientOpId.substring(0, 8).toUpperCase() : clientOpId}',
+                      style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF0070BA), fontSize: 13),
+                    ),
+                    const SizedBox(height: 4),
+                    Text('${isOfflineQueued ? 'Importe pendiente' : 'Total pagado'}: Bs. ${total.toStringAsFixed(2)}', style: const TextStyle(fontSize: 12)),
+                    Text('${isOfflineQueued ? 'Saldo disponible local' : 'Nuevo saldo billetera'}: Bs. ${(saldoActual - total).toStringAsFixed(2)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.successColor)),
+                  ],
+                ),
+              ),
+              if (isOfflineQueued) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  '⚡ En cuanto el dispositivo recupere conexión a Internet, la venta se sincronizará automáticamente contra el inventario central.',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Aceptar', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      setState(() => _isSubmitting = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', '')),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _performDirectPurchase() async {
+    final owner=DatabaseHelper.scope;
+    final cart = context.read<CartService>();
+    if (cart.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('El carrito está vacío'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    if (cart.selectedBranch == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Por favor selecciona una sucursal para despachar tu compra'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+      return;
+    }
+
+    setState(() => _isSubmitting = true);
+
+    try {
+      final paypalService = context.read<PayPalService>();
+      final items = cart.items
+          .map((item) => {
+                'name': '${item.product.nombre} (${item.variant.talla}/${item.variant.color})',
+                'quantity': item.quantity,
+                'unit_amount_bob': item.unitPrice,
+              })
+          .toList();
+
+      // 1. Crear la orden en PayPal Sandbox
+      final orderRes = await paypalService.createOrder(
+        montoBob: _getFinalTotal(cart.total),
+        detalles: cart.items.map((item) => {'variante_id': item.variant.id,
+          'cantidad': item.quantity, 'precio_unitario': item.unitPrice}).toList(),
+        codigoCupon: _appliedCouponCode,
+        sucursalId: cart.selectedBranch!.id,
+        descripcion: 'Compra directa en App Móvil FICCT STORE',
+        items: items,
+      );
+
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+
+      if(!mounted || owner!=DatabaseHelper.scope) return;
+      if (orderRes == null || orderRes['order_id'] == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo iniciar la pasarela de PayPal. Verifica la conexión.'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+        return;
+      }
+
+      final orderId = orderRes['order_id'].toString();
+      final approveUrl = orderRes['approve_url']?.toString() ?? 'https://www.sandbox.paypal.com/checkoutnow?token=$orderId';
+      final montoUsd = (orderRes['monto_usd'] is num) ? (orderRes['monto_usd'] as num).toDouble() : (cart.total / 6.96);
+
+      // 2. Abrir la ventana segura de PayPal Sandbox
+      await UrlHelper.openUrl(approveUrl);
+
+      // 3. Mostrar diálogo de captura y confirmación
+      if (!mounted) return;
+      await showModalBottomSheet(
+        context: context,
+        isDismissible: false,
+        enableDrag: false,
+        backgroundColor: AppTheme.getCardBg(context),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) {
+          bool isCapturing = false;
+          return StatefulBuilder(
+            builder: (bottomCtx, setModalState) {
+              final textP = AppTheme.getTextPrimary(bottomCtx);
+              final textS = AppTheme.getTextSecondary(bottomCtx);
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0070BA).withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(Icons.payment_rounded, color: Color(0xFF0070BA), size: 28),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Ventana de PayPal Abierta',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: textP),
+                              ),
+                              Text(
+                                'Autoriza el cobro en la ventana emergente',
+                                style: TextStyle(fontSize: 12, color: textS),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppTheme.getBg(bottomCtx),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppTheme.getBorder(bottomCtx)),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text('Total en Bolivianos:', style: TextStyle(color: textS, fontSize: 13)),
+                              Text('Bs. ${cart.total.toStringAsFixed(2)}', style: TextStyle(color: textP, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text('Equivalente a pagar:', style: TextStyle(color: textS, fontSize: 13)),
+                              Text('\$ ${montoUsd.toStringAsFixed(2)} USD', style: const TextStyle(color: Color(0xFF0070BA), fontWeight: FontWeight.bold, fontSize: 14)),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      '1. Inicia sesión con tu cuenta Sandbox Personal en la ventana de PayPal.\n2. Presiona "Pay" para autorizar el cobro.\n3. Luego presiona el botón abajo para confirmar.',
+                      style: TextStyle(color: textS, fontSize: 12, height: 1.4),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: () => UrlHelper.openUrl(approveUrl),
+                      icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                      label: const Text('Abrir Ventana de PayPal', style: TextStyle(fontWeight: FontWeight.w600)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF0070BA),
+                        side: const BorderSide(color: Color(0xFF0070BA)),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: isCapturing
+                          ? null
+                          : () async {
+                              if(!mounted || owner!=DatabaseHelper.scope) return;
+                              setModalState(() => isCapturing = true);
+
+                              final saleDetails = cart.items
+                                  .map((i) => {
+                                        'variante_id': i.variant.id,
+                                        'cantidad': i.quantity,
+                                        'precio_unitario': i.unitPrice,
+                                      })
+                                  .toList();
+
+                              final auth = context.read<AuthService>();
+                              final capRes = await paypalService.captureOrder(
+                                orderId: orderId,
+                                sucursalId: cart.selectedBranch!.id,
+                                detalles: saleDetails,
+                                clienteId: auth.currentUser?.id,
+                                nota: 'Pago con PayPal Sandbox desde App Móvil',
+                              );
+
+                              setModalState(() => isCapturing = false);
+
+                              if (!mounted) return;
+                              if (capRes != null && capRes['venta'] != null) {
+                                final venta = capRes['venta'] as Map<String, dynamic>;
+                                final numRecibo = venta['numero_recibo'] ?? 'VTA-CONFIRMADA';
+                                final captureId = capRes['paypal_capture_id'] ?? orderId;
+
+                                // Disparar Notificación Push Nativa en el celular
+                                LocalNotificationService.showNotification(
+                                  id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                                  title: '¡Compra Confirmada!',
+                                  body: 'Nota de Venta #$numRecibo emitida con éxito. Total: ${cart.total.toStringAsFixed(2)} Bs.',
+                                  payload: 'recibo_$numRecibo',
+                                );
+
+                                cart.clearCart();
+                                if (ctx.mounted) Navigator.pop(ctx); // Cierra bottom sheet
+
+                                // Mostrar diálogo de confirmación oficial
+                                await showDialog(
+                                  context: context,
+                                  barrierDismissible: false,
+                                  builder: (dialogCtx) => AlertDialog(
+                                    backgroundColor: AppTheme.getCardBg(dialogCtx),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(AppTheme.borderRadiusLarge),
+                                    ),
+                                    title: const Row(
+                                      children: [
+                                        Icon(Icons.check_circle_rounded, color: AppTheme.successColor, size: 28),
+                                        SizedBox(width: 10),
+                                        Text(
+                                          '¡Pago con PayPal Exitoso!',
+                                          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                                        ),
+                                      ],
+                                    ),
+                                    content: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Tu compra ha sido cobrada y confirmada mediante PayPal Sandbox:',
+                                          style: TextStyle(color: AppTheme.getTextSecondary(dialogCtx), fontSize: 13),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: AppTheme.successColor.withValues(alpha: 0.1),
+                                            borderRadius: BorderRadius.circular(8),
+                                            border: Border.all(color: AppTheme.successColor.withValues(alpha: 0.3)),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text('N° RECIBO: $numRecibo', style: const TextStyle(fontWeight: FontWeight.bold, color: AppTheme.successColor, fontSize: 15)),
+                                              const SizedBox(height: 4),
+                                              Text('Transacción: PAYPAL_$captureId', style: TextStyle(color: AppTheme.getTextSecondary(dialogCtx), fontSize: 11)),
+                                            ],
+                                          ),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          'El stock de la tienda ha sido descontado y tu pedido está listo para despacho en la sucursal seleccionada.',
+                                          style: TextStyle(color: AppTheme.getTextSecondary(dialogCtx), fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                    actions: [
+                                      ElevatedButton(
+                                        onPressed: () {
+                                          Navigator.pop(dialogCtx);
+                                          Navigator.pop(context); // Cierra CartScreen
+                                        },
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF0070BA),
+                                          foregroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                        ),
+                                        child: const Text('Aceptar'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              } else {
+                                final err = paypalService.errorMessage ??
+                                    'Aún no has autorizado el pago en la ventana de PayPal o hubo un problema al capturar.';
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(err),
+                                    backgroundColor: AppTheme.errorColor,
+                                    duration: const Duration(seconds: 5),
+                                  ),
+                                );
+                              }
+                            },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF0070BA),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: isCapturing
+                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                          : const Text('Confirmar Pago Aprobado', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: isCapturing ? null : () => Navigator.pop(ctx),
+                      child: Text('Cancelar', style: TextStyle(color: textS)),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al conectar con PayPal: ${e.toString()}'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = AppTheme.getBg(context);
+    final cardBg = AppTheme.getCardBg(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final textSecondary = AppTheme.getTextSecondary(context);
+    final accent = AppTheme.getAccent(context);
+    final border = AppTheme.getBorder(context);
+    final cart = context.watch<CartService>();
+    final paypalReady = context.watch<ConnectivityService>().isOnline && context.watch<WalletService>().paypalAvailable == true;
+    _invalidateStaleCoupon();
+
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        backgroundColor: cardBg,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        shape: Border(bottom: BorderSide(color: border)),
+        title: Text(
+          'Mi Carrito (${cart.totalItemCount})',
+          style: TextStyle(
+            color: textPrimary,
+            fontSize: 17,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        actions: [
+          if (cart.items.isNotEmpty)
+            TextButton.icon(
+              onPressed: () => cart.clearCart(),
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18, color: AppTheme.errorColor),
+              label: const Text(
+                'Vaciar',
+                style: TextStyle(color: AppTheme.errorColor, fontSize: 13),
+              ),
+            ),
+        ],
+      ),
+      body: cart.isEmpty
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(32.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.shopping_bag_outlined,
+                        size: 64,
+                        color: accent,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      'Tu carrito está vacío',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Explora nuestro catálogo y agrega tus prendas favoritas para apartarlas.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 13, color: textSecondary),
+                    ),
+                    const SizedBox(height: 24),
+                    ElevatedButton.icon(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.storefront_outlined),
+                      label: const Text('Explorar Tienda'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: accent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                // Lista de prendas en el carrito
+                ...cart.items.map((item) {
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: cardBg,
+                      borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                      border: Border.all(color: border),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Icono o Imagen
+                        Container(
+                          width: 65,
+                          height: 65,
+                          decoration: BoxDecoration(
+                            color: accent.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: item.product.imagenUrl != null && item.product.imagenUrl!.isNotEmpty
+                              ? ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.network(
+                                    item.product.imagenUrl!,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stackTrace) => Icon(
+                                      Icons.checkroom,
+                                      color: accent,
+                                    ),
+                                  ),
+                                )
+                              : Icon(Icons.checkroom, color: accent),
+                        ),
+                        const SizedBox(width: 12),
+
+                        // Detalles de la prenda
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.product.nombre,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                  color: textPrimary,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: accent.withValues(alpha: 0.1),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      'Talla: ${item.variant.talla}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                        color: accent,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: border.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      item.variant.color,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w500,
+                                        color: textSecondary,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  Text(
+                                    'Bs. ${item.totalPrice.toStringAsFixed(2)}',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: accent,
+                                    ),
+                                  ),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.remove_circle_outline, size: 20),
+                                        color: textSecondary,
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                                        onPressed: () => cart.updateQuantity(
+                                          item.variant.id,
+                                          item.quantity - 1,
+                                        ),
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                                        child: Text(
+                                          '${item.quantity}',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 14,
+                                            color: textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                       IconButton(
+                                         icon: Icon(
+                                           Icons.add_circle_outline,
+                                           size: 20,
+                                           color: item.quantity < 3 ? accent : textSecondary.withValues(alpha: 0.4),
+                                         ),
+                                         padding: EdgeInsets.zero,
+                                         constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                                         onPressed: item.quantity < 3
+                                             ? () => cart.updateQuantity(
+                                                   item.variant.id,
+                                                   item.quantity + 1,
+                                                 )
+                                             : () {
+                                                 ScaffoldMessenger.of(context).showSnackBar(
+                                                   const SnackBar(
+                                                     content: Text('Máximo 3 unidades por prenda'),
+                                                     duration: Duration(seconds: 1),
+                                                     behavior: SnackBarBehavior.floating,
+                                                   ),
+                                                 );
+                                               },
+                                       ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+
+                const SizedBox(height: 12),
+
+                // Selector de Sucursal Click & Collect
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                    border: Border.all(color: border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Icon(Icons.store_mall_directory_rounded, size: 20, color: accent),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Sucursal de Retiro (Click & Collect)',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: textPrimary,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Elige en qué sede deseas apartar tus prendas para ir a recogerlas:',
+                        style: TextStyle(fontSize: 12, color: textSecondary),
+                      ),
+                      const SizedBox(height: 12),
+                      if (_isLoadingBranches)
+                        Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: CircularProgressIndicator(color: accent),
+                          ),
+                        )
+                      else if (_branches.isEmpty)
+                        Text(
+                          'No hay sucursales disponibles en este momento',
+                          style: TextStyle(color: textSecondary, fontSize: 12),
+                        )
+                      else
+                        DropdownButtonFormField<String>(
+                          initialValue: _branches.any((b) => b.id == cart.selectedBranch?.id)
+                              ? cart.selectedBranch?.id
+                              : (_branches.isNotEmpty ? _branches.first.id : null),
+                          isExpanded: true,
+                          dropdownColor: cardBg,
+                          decoration: InputDecoration(
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide(color: border),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide(color: border),
+                            ),
+                          ),
+                          items: _branches.map((b) {
+                            return DropdownMenuItem<String>(
+                              value: b.id,
+                              child: Text(
+                                '${b.nombre} (${b.ciudad ?? "Santa Cruz"})',
+                                style: TextStyle(
+                                  color: textPrimary,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: (newBranchId) {
+                            if (newBranchId != null) {
+                              final branch = _branches.firstWhere((b) => b.id == newBranchId);
+                              cart.setSelectedBranch(branch);
+                            }
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Sección de Cupón de Descuento
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                    border: Border.all(color: border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Icon(Icons.local_offer_outlined, size: 18, color: accent),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Cupón de Descuento',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: textPrimary),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (_appliedCouponCode != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.green.withValues(alpha: 0.3)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.check_circle_rounded, color: Colors.green, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  '$_appliedCouponCode aplicado (-Bs. ${_couponDiscount.toStringAsFixed(2)})',
+                                  style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                              ),
+                              IconButton(
+                                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                                padding: EdgeInsets.zero,
+                                icon: const Icon(Icons.close_rounded, size: 18, color: Colors.red),
+                                onPressed: () {
+                                  setState(() {
+                                    _appliedCouponCode = null;
+                                    _couponDiscount = 0.0;
+                                    _couponController.clear();
+                                  });
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                      ] else ...[
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _couponController,
+                                textCapitalization: TextCapitalization.characters,
+                                decoration: InputDecoration(
+                                  hintText: 'Ej: PROMO10, FICC2026',
+                                  hintStyle: TextStyle(fontSize: 12, color: textSecondary),
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    borderSide: BorderSide(color: border),
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    borderSide: BorderSide(color: border),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton(
+                              onPressed: _isValidatingCoupon ? null : _applyCoupon,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: accent,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              child: _isValidatingCoupon
+                                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                  : const Text('Aplicar', style: TextStyle(fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 16),
+
+                // Resumen de Costo
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: cardBg,
+                    borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                    border: Border.all(color: border),
+                  ),
+                  child: Column(
+                    children: [
+                      Wrap(
+                        spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text('Subtotal prendas', style: TextStyle(color: textSecondary, fontSize: 13)),
+                          Text(
+                            'Bs. ${cart.subtotal.toStringAsFixed(2)}',
+                            style: TextStyle(color: textPrimary, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                      if (_couponDiscount > 0) ...[
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              'Descuento Cupón ($_appliedCouponCode)',
+                              style: const TextStyle(color: Colors.green, fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
+                            Text(
+                              '-Bs. ${_couponDiscount.toStringAsFixed(2)}',
+                              style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text('Costo de reserva', style: TextStyle(color: textSecondary, fontSize: 13)),
+                          const Text(
+                            'Bs. 0.00 (Gratis)',
+                            style: TextStyle(color: AppTheme.successColor, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                      Divider(height: 20, color: border),
+                      Wrap(
+                        spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            'Total a Pagar en Tienda',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: textPrimary),
+                          ),
+                          Text(
+                            'Bs. ${_getFinalTotal(cart.total).toStringAsFixed(2)}',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: accent),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+
+                // Botón Billetera Virtual (Prepago - Funciona Online y Offline)
+                Consumer<WalletService>(
+                  builder: (context, ws, _) {
+                    final saldo = ws.saldo;
+                    final hasFunds = saldo >= cart.total;
+                    final conn = context.watch<ConnectivityService>();
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _isSubmitting ? null : _handleWalletPayment,
+                          icon: _isSubmitting
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                                )
+                              : const Icon(Icons.account_balance_wallet_rounded),
+                          label: Wrap(
+                            spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                conn.isOnline ? 'Pagar con Billetera Virtual' : 'Pagar con Billetera (Offline)',
+                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.25),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  'Bs. ${saldo.toStringAsFixed(2)}',
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ],
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: hasFunds ? const Color(0xFF0F766E) : Colors.grey.shade600,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: hasFunds ? 3 : 0,
+                          ),
+                        ),
+                        if (!hasFunds)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4, bottom: 4),
+                            child: Wrap(
+                              spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                              children: [
+                                Text(
+                                  'Saldo insuficiente para esta compra. ',
+                                  style: TextStyle(fontSize: 11, color: textSecondary),
+                                ),
+                                GestureDetector(
+                                  onTap: () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(builder: (_) => const WalletScreen()),
+                                  ),
+                                  child: const Text(
+                                    'Recargar aquí',
+                                    style: TextStyle(fontSize: 11, color: Color(0xFF0070BA), fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        const SizedBox(height: 12),
+                      ],
+                    );
+                  },
+                ),
+
+                // Botón 1: Comprar Online Directo con PayPal
+                ElevatedButton.icon(
+                  onPressed: _isSubmitting || !paypalReady ? null : _handleDirectPurchase,
+                  icon: _isSubmitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Icon(Icons.payment_rounded),
+                  label: Text(
+                    _isSubmitting ? 'Iniciando PayPal...' : paypalReady ? 'Pagar Directo con PayPal' : 'PayPal no disponible',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0070BA),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 2,
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                // Botón 2: Apartar con Reserva Click & Collect
+                OutlinedButton.icon(
+                  onPressed: _isSubmitting ? null : _handleConfirmReservation,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                  label: const Text(
+                    'Apartar con Reserva Click & Collect',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: accent,
+                    side: BorderSide(color: accent),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 24),
+              ],
+            ),
+    );
+  }
+}

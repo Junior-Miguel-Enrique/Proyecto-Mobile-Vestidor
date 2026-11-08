@@ -1,0 +1,1233 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../../config/routes.dart';
+import '../../config/theme.dart';
+import '../../services/auth_service.dart';
+import '../../services/theme_service.dart';
+import '../../services/notification_service.dart';
+import 'branches_public_screen.dart';
+import 'purchase_history_screen.dart';
+import '../shop/virtual_fitting_screen.dart';
+import '../notifications/notifications_screen.dart';
+import '../wallet/wallet_screen.dart';
+import '../../services/wallet_service.dart';
+import '../../core/services/connectivity_service.dart';
+
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animController;
+  late Animation<double> _fadeAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+    _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _animController, curve: Curves.easeOut),
+    );
+    _animController.forward();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<NotificationService>().fetchUnreadCount();
+      context.read<WalletService>().fetchWallet();
+    });
+  }
+
+  @override
+  void dispose() {
+    _animController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppTheme.getCardBg(context),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppTheme.borderRadiusLarge),
+        ),
+        title: Text(
+          'Cerrar Sesión',
+          style: TextStyle(
+            color: AppTheme.getTextPrimary(context),
+            fontWeight: FontWeight.w600,
+            fontSize: 18,
+          ),
+        ),
+        content: Text(
+          '¿Estás seguro de que deseas salir de tu cuenta?',
+          style: TextStyle(
+            color: AppTheme.getTextSecondary(context),
+            fontSize: 14,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(
+              'Cancelar',
+              style: TextStyle(color: AppTheme.getTextSecondary(context)),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.errorColor,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            ),
+            child: const Text('Cerrar Sesión'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      final closed = await context.read<AuthService>().logout();
+      if (mounted && closed) {
+        Navigator.pushReplacementNamed(context, AppRoutes.login);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeService = context.watch<ThemeService>();
+    final isDark = themeService.isDarkMode;
+    final bg = AppTheme.getBg(context);
+    final cardBg = AppTheme.getCardBg(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final textSecondary = AppTheme.getTextSecondary(context);
+    final accent = AppTheme.getAccent(context);
+    final border = AppTheme.getBorder(context);
+
+    return Scaffold(
+      backgroundColor: bg,
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: accent,
+        onPressed: () {
+          Navigator.pushNamed(context, AppRoutes.chatbot);
+        },
+        icon: const Icon(Icons.smart_toy_rounded, color: Colors.white),
+        label: const Text(
+          'Asistente IA',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: SafeArea(
+        child: FadeTransition(
+          opacity: _fadeAnim,
+          child: Consumer<AuthService>(
+            builder: (context, auth, _) {
+              final user = auth.currentUser;
+              if (user == null) {
+                return Center(
+                  child: CircularProgressIndicator(color: accent),
+                );
+              }
+
+              return CustomScrollView(
+                slivers: [
+                  // App Bar / Topbar idéntico a Web
+                  SliverToBoxAdapter(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: cardBg,
+                        border: Border(
+                          bottom: BorderSide(color: border),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                  AppTheme.borderRadiusSmall,
+                                ),
+                                child: Image.asset(
+                                  'assets/images/logo.png',
+                                  height: 34,
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                'FICCT STORE',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  color: textPrimary,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              // Pill de Conectividad Online / Offline
+                              Consumer<ConnectivityService>(
+                                builder: (context, conn, _) {
+                                  final isOnline = conn.isOnline;
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: isOnline
+                                          ? const Color(0xFF10B981).withValues(alpha: 0.12)
+                                          : const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: isOnline ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                        width: 0.8,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: 6,
+                                          height: 6,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: isOnline ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          isOnline ? 'Online' : 'Offline',
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                            color: isOnline ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              // Chatbot Inteligente IA
+                              IconButton(
+                                icon: Icon(
+                                  Icons.smart_toy_rounded,
+                                  color: accent,
+                                  size: 22,
+                                ),
+                                tooltip: 'Asistente Virtual IA',
+                                onPressed: () {
+                                  Navigator.pushNamed(context, AppRoutes.chatbot);
+                                },
+                              ),
+                              const SizedBox(width: 2),
+                              // Notificaciones Bell con Badge
+                              Consumer<NotificationService>(
+                                builder: (context, notifService, _) {
+                                  final count = notifService.unreadCount;
+                                  return IconButton(
+                                    icon: Stack(
+                                      alignment: Alignment.center,
+                                      children: [
+                                        Icon(
+                                          count > 0 ? Icons.notifications_active_rounded : Icons.notifications_outlined,
+                                          color: count > 0 ? accent : textSecondary,
+                                          size: 22,
+                                        ),
+                                        if (count > 0)
+                                          Positioned(
+                                            top: 0,
+                                            right: 0,
+                                            child: Container(
+                                              padding: const EdgeInsets.all(3),
+                                              decoration: const BoxDecoration(
+                                                color: AppTheme.errorColor,
+                                                shape: BoxShape.circle,
+                                              ),
+                                              constraints: const BoxConstraints(minWidth: 15, minHeight: 15),
+                                              child: Center(
+                                                child: Text(
+                                                  count > 9 ? '9+' : '$count',
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 8,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    tooltip: 'Notificaciones ($count)',
+                                    onPressed: () {
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(builder: (_) => const NotificationsScreen()),
+                                      );
+                                    },
+                                  );
+                                },
+                              ),
+                              const SizedBox(width: 2),
+                              // Dark mode toggle button
+                              IconButton(
+                                icon: Icon(
+                                  isDark
+                                      ? Icons.light_mode_outlined
+                                      : Icons.dark_mode_outlined,
+                                  color: accent,
+                                  size: 22,
+                                ),
+                                tooltip: isDark
+                                    ? 'Cambiar a modo claro'
+                                    : 'Cambiar a modo oscuro',
+                                onPressed: () => themeService.toggleTheme(),
+                              ),
+                              const SizedBox(width: 4),
+                              IconButton(
+                                icon: Icon(
+                                  Icons.logout_rounded,
+                                  color: textSecondary,
+                                  size: 22,
+                                ),
+                                tooltip: 'Cerrar Sesión',
+                                onPressed: _handleLogout,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // Alerta reactiva de Modo Offline
+                  SliverToBoxAdapter(
+                    child: Consumer<ConnectivityService>(
+                      builder: (context, conn, _) {
+                        if (conn.isOnline) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFFF59E0B), width: 1.2),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.wifi_off_rounded, color: Color(0xFFF59E0B), size: 20),
+                                const SizedBox(width: 10),
+                                const Expanded(
+                                  child: Text(
+                                    'Modo Offline Activo: Puedes explorar el catálogo en caché, pagar con tu Billetera Prepago y consultar al Chatbot Local.',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFFD97706),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 20)),
+
+                  // Welcome Banner con borde izquierdo Amber (Igual a Web)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: cardBg,
+                          borderRadius: BorderRadius.circular(
+                            AppTheme.borderRadiusLarge,
+                          ),
+                          border: Border(
+                            left: BorderSide(color: accent, width: 4),
+                            top: BorderSide(color: accent),
+                            right: BorderSide(color: accent),
+                            bottom: BorderSide(color: accent),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: isDark
+                                  ? const Color(0x40000000)
+                                  : const Color(0x12000000),
+                              blurRadius: isDark ? 10 : 6,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          children: [
+                            // Avatar
+                            Container(
+                              width: 52,
+                              height: 52,
+                              decoration: AppTheme.logoBadgeDecorationOf(context),
+                              child: Center(
+                                child: Text(
+                                  user.fullName.isNotEmpty
+                                      ? user.fullName[0].toUpperCase()
+                                      : 'U',
+                                  style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    color: accent,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Hola, ${user.fullName}',
+                                    style: TextStyle(
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.bold,
+                                      color: textPrimary,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    user.email,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: textSecondary,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: user.isActive
+                                          ? AppTheme.successBg
+                                          : AppTheme.errorBg,
+                                      borderRadius: BorderRadius.circular(
+                                        AppTheme.borderRadiusSmall,
+                                      ),
+                                      border: Border.all(
+                                        color: user.isActive
+                                            ? AppTheme.successColor.withValues(alpha: 0.3)
+                                            : AppTheme.errorColor.withValues(alpha: 0.3),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: 6,
+                                          height: 6,
+                                          decoration: BoxDecoration(
+                                            color: user.isActive
+                                                ? AppTheme.successColor
+                                                : AppTheme.errorColor,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          user.isActive
+                                              ? 'Cuenta Activa'
+                                              : 'Cuenta Inactiva',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
+                                            color: user.isActive
+                                                ? AppTheme.successColor
+                                                : AppTheme.errorColor,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+
+                  // Info Cards
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: _buildInfoCard(
+                              context: context,
+                              icon: Icons.tag_rounded,
+                              label: 'ID de Usuario',
+                              value: '#${user.id.length > 8 ? user.id.substring(0, 8) : user.id}',
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _buildInfoCard(
+                              context: context,
+                              icon: Icons.calendar_today_outlined,
+                              label: 'Fecha Registro',
+                              value: _formatDate(user.createdAt),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 16)),
+
+                  // Action items
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Container(
+                        decoration: AppTheme.cardDecorationOf(context),
+                        child: Column(
+                          children: [
+                            Consumer<WalletService>(
+                              builder: (context, ws, _) {
+                                final s = ws.saldo;
+                                return _buildActionTile(
+                                  context: context,
+                                  icon: Icons.account_balance_wallet_rounded,
+                                  label: 'Mi Billetera Virtual (Prepago)',
+                                  subtitle: 'Saldo disponible: Bs. ${s.toStringAsFixed(2)} • Compras offline',
+                                  color: const Color(0xFF0070BA),
+                                  onTap: () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(builder: (_) => const WalletScreen()),
+                                  ),
+                                );
+                              },
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.receipt_long_rounded,
+                              label: 'Mis Compras',
+                              subtitle: 'Historial de compras digitales',
+                              color: AppTheme.successColor,
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const PurchaseHistoryScreen(),
+                                ),
+                              ),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.store_rounded,
+                              label: 'Nuestras Tiendas',
+                              subtitle: 'Sucursales y disponibilidad por ciudad',
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const BranchesPublicScreen(),
+                                ),
+                              ),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.accessibility_new_rounded,
+                              label: 'Vestidor Virtual & Guía de Tallas',
+                              subtitle: 'Calcula tu talla exacta según tus medidas',
+                              color: accent,
+                              onTap: () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const VirtualFittingScreen(),
+                                ),
+                              ),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            Consumer<NotificationService>(
+                              builder: (context, notif, _) => _buildActionTile(
+                                context: context,
+                                icon: notif.unreadCount > 0
+                                    ? Icons.notifications_active_rounded
+                                    : Icons.notifications_outlined,
+                                label: 'Bandeja de Notificaciones',
+                                subtitle: notif.unreadCount > 0
+                                    ? '${notif.unreadCount} alerta(s) sin leer'
+                                    : 'Estado de reservas y compras',
+                                color: notif.unreadCount > 0 ? accent : null,
+                                onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const NotificationsScreen(),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.cloud_sync_outlined,
+                              label: 'Sincronización Offline (SQLite)',
+                              subtitle: 'Cola de transacciones locales y estado de red',
+                              color: Colors.amber.shade700,
+                              onTap: () => Navigator.pushNamed(context, AppRoutes.offlineSync),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.edit_outlined,
+                              label: 'Editar Perfil',
+                              subtitle: 'Actualiza tu nombre y correo',
+                              onTap: () => _showEditProfile(context, auth),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.lock_reset_rounded,
+                              label: 'Cambiar Contraseña',
+                              subtitle: 'Actualiza tu clave de acceso de forma segura',
+                              color: accent,
+                              onTap: () => _showChangePassword(context, auth),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: isDark
+                                  ? Icons.light_mode_outlined
+                                  : Icons.dark_mode_outlined,
+                              label: isDark ? 'Modo Claro' : 'Modo Oscuro',
+                              subtitle: isDark
+                                  ? 'Cambiar a interfaz clara'
+                                  : 'Cambiar a interfaz oscura',
+                              color: accent,
+                              onTap: () => themeService.toggleTheme(),
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.security_outlined,
+                              label: 'Seguridad y Permisos',
+                              subtitle: 'Sesión activa mediante JWT Seguro',
+                              onTap: null,
+                            ),
+                            Divider(height: 1, indent: 56, color: border),
+                            _buildActionTile(
+                              context: context,
+                              icon: Icons.logout_rounded,
+                              label: 'Cerrar Sesión',
+                              subtitle: 'Finalizar sesión en este dispositivo',
+                              color: AppTheme.errorColor,
+                              onTap: _handleLogout,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SliverToBoxAdapter(child: SizedBox(height: 32)),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoCard({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    final accent = AppTheme.getAccent(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final textSecondary = AppTheme.getTextSecondary(context);
+
+    return Container(
+      decoration: AppTheme.cardDecorationOf(context),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: AppTheme.logoBadgeDecorationOf(context),
+            child: Icon(icon, color: accent, size: 18),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: textSecondary,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: textPrimary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionTile({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+    required String subtitle,
+    required VoidCallback? onTap,
+    Color? color,
+  }) {
+    final accent = AppTheme.getAccent(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final textSecondary = AppTheme.getTextSecondary(context);
+    final textMuted = AppTheme.getTextMuted(context);
+
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      leading: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: (color ?? accent).withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(AppTheme.borderRadiusSmall),
+        ),
+        child: Icon(icon, color: color ?? accent, size: 18),
+      ),
+      title: Text(
+        label,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: color ?? textPrimary,
+        ),
+      ),
+      subtitle: Text(
+        subtitle,
+        style: TextStyle(
+          fontSize: 12,
+          color: textSecondary,
+        ),
+      ),
+      trailing: onTap == null ? null : Icon(
+        Icons.chevron_right_rounded,
+        color: textMuted,
+        size: 20,
+      ),
+      onTap: onTap,
+      ),
+    );
+  }
+
+  void _showEditProfile(BuildContext context, AuthService authService) {
+    final user = authService.currentUser!;
+    final nameCtrl = TextEditingController(text: user.fullName);
+    final emailCtrl = TextEditingController(text: user.email);
+    final cardBg = AppTheme.getCardBg(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final accent = AppTheme.getAccent(context);
+    final border = AppTheme.getBorder(context);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          20,
+          24,
+          MediaQuery.of(context).viewInsets.bottom + 24,
+        ),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          border: Border(
+            top: BorderSide(color: border),
+            left: BorderSide(color: border),
+            right: BorderSide(color: border),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Editar Perfil',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: textPrimary,
+              ),
+            ),
+            const SizedBox(height: 20),
+            TextFormField(
+              controller: nameCtrl,
+              style: TextStyle(color: textPrimary),
+              decoration: AppTheme.inputDecorationOf(
+                context,
+                icon: Icons.person_outline_rounded,
+                hint: 'Nombre completo',
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextFormField(
+              controller: emailCtrl,
+              style: TextStyle(color: textPrimary),
+              decoration: AppTheme.inputDecorationOf(
+                context,
+                icon: Icons.mail_outline_rounded,
+                hint: 'Correo electrónico',
+              ),
+            ),
+            const SizedBox(height: 22),
+            SizedBox(
+              height: 46,
+              child: ElevatedButton(
+                onPressed: () async {
+                  final success = await authService.updateProfile(
+                    fullName: nameCtrl.text.trim(),
+                    email: emailCtrl.text.trim(),
+                  );
+                  if (success && context.mounted) {
+                    Navigator.pop(context);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Row(
+                          children: [
+                            Icon(
+                              Icons.check_circle_outline,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                            SizedBox(width: 12),
+                            Text('Perfil actualizado correctamente'),
+                          ],
+                        ),
+                        backgroundColor: AppTheme.successColor,
+                        behavior: SnackBarBehavior.floating,
+                        margin: const EdgeInsets.all(16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(
+                            AppTheme.borderRadiusMedium,
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: accent,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(
+                      AppTheme.borderRadiusMedium,
+                    ),
+                  ),
+                ),
+                child: const Text(
+                  'Guardar Cambios',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showChangePassword(BuildContext context, AuthService authService) {
+    final currentCtrl = TextEditingController();
+    final newCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+
+    final cardBg = AppTheme.getCardBg(context);
+    final textPrimary = AppTheme.getTextPrimary(context);
+    final textSecondary = AppTheme.getTextSecondary(context);
+    final accent = AppTheme.getAccent(context);
+    final border = AppTheme.getBorder(context);
+
+    bool obscureCurrent = true;
+    bool obscureNew = true;
+    bool obscureConfirm = true;
+    bool isSubmitting = false;
+    String? localError;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return Container(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              20,
+              24,
+              MediaQuery.of(context).viewInsets.bottom + 24,
+            ),
+            decoration: BoxDecoration(
+              color: cardBg,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              border: Border(
+                top: BorderSide(color: border),
+                left: BorderSide(color: border),
+                right: BorderSide(color: border),
+              ),
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: border,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: accent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(Icons.lock_reset_rounded, color: accent, size: 22),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Cambiar Contraseña',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                                color: textPrimary,
+                              ),
+                            ),
+                            Text(
+                              'Define una nueva clave de acceso segura',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+
+                  if (localError != null) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppTheme.errorBg,
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusSmall),
+                        border: Border.all(color: AppTheme.errorColor.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.error_outline_rounded, color: AppTheme.errorColor, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              localError!,
+                              style: const TextStyle(
+                                color: AppTheme.errorColor,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+
+                  // Contraseña Actual
+                  TextFormField(
+                    controller: currentCtrl,
+                    obscureText: obscureCurrent,
+                    style: TextStyle(color: textPrimary),
+                    decoration: InputDecoration(
+                      prefixIcon: Icon(Icons.lock_outline_rounded, color: accent, size: 20),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureCurrent ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                          color: textSecondary,
+                          size: 20,
+                        ),
+                        onPressed: () => setModalState(() => obscureCurrent = !obscureCurrent),
+                      ),
+                      hintText: 'Contraseña actual',
+                      hintStyle: TextStyle(color: textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: AppTheme.getInputBg(context),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: accent, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Nueva Contraseña
+                  TextFormField(
+                    controller: newCtrl,
+                    obscureText: obscureNew,
+                    style: TextStyle(color: textPrimary),
+                    decoration: InputDecoration(
+                      prefixIcon: Icon(Icons.shield_outlined, color: accent, size: 20),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureNew ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                          color: textSecondary,
+                          size: 20,
+                        ),
+                        onPressed: () => setModalState(() => obscureNew = !obscureNew),
+                      ),
+                      hintText: 'Nueva contraseña (mín. 8 car.)',
+                      hintStyle: TextStyle(color: textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: AppTheme.getInputBg(context),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: accent, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Confirmar Nueva Contraseña
+                  TextFormField(
+                    controller: confirmCtrl,
+                    obscureText: obscureConfirm,
+                    style: TextStyle(color: textPrimary),
+                    decoration: InputDecoration(
+                      prefixIcon: Icon(Icons.check_circle_outline_rounded, color: accent, size: 20),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureConfirm ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                          color: textSecondary,
+                          size: 20,
+                        ),
+                        onPressed: () => setModalState(() => obscureConfirm = !obscureConfirm),
+                      ),
+                      hintText: 'Confirmar nueva contraseña',
+                      hintStyle: TextStyle(color: textSecondary, fontSize: 14),
+                      filled: true,
+                      fillColor: AppTheme.getInputBg(context),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        borderSide: BorderSide(color: accent, width: 1.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
+                  SizedBox(
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: isSubmitting
+                          ? null
+                          : () async {
+                              final current = currentCtrl.text.trim();
+                              final newPass = newCtrl.text.trim();
+                              final confirm = confirmCtrl.text.trim();
+
+                              if (current.isEmpty) {
+                                setModalState(() => localError = 'Ingresa tu contraseña actual');
+                                return;
+                              }
+                              if (newPass.length < 8) {
+                                setModalState(() => localError = 'La nueva contraseña debe tener al menos 8 caracteres');
+                                return;
+                              }
+                              if (newPass == current) {
+                                setModalState(() => localError = 'La nueva contraseña debe ser diferente a la actual');
+                                return;
+                              }
+                              if (newPass != confirm) {
+                                setModalState(() => localError = 'Las nuevas contraseñas no coinciden');
+                                return;
+                              }
+
+                              setModalState(() {
+                                isSubmitting = true;
+                                localError = null;
+                              });
+
+                              final result = await authService.changePassword(
+                                currentPassword: current,
+                                newPassword: newPass,
+                              );
+
+                              if (result['success'] == true && context.mounted) {
+                                Navigator.pop(context);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.check_circle_outline,
+                                          color: Colors.white,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(
+                                            result['message'] ?? 'Contraseña actualizada correctamente',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    backgroundColor: AppTheme.successColor,
+                                    behavior: SnackBarBehavior.floating,
+                                    margin: const EdgeInsets.all(16),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(
+                                        AppTheme.borderRadiusMedium,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              } else {
+                                setModalState(() {
+                                  isSubmitting = false;
+                                  localError = result['message'] ?? 'Error al actualizar contraseña';
+                                });
+                              }
+                            },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: accent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppTheme.borderRadiusMedium),
+                        ),
+                      ),
+                      child: isSubmitting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Text(
+                              'Actualizar Contraseña',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  String _formatDate(String dateStr) {
+    try {
+      final date = DateTime.parse(dateStr);
+      final months = [
+        'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+        'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic',
+      ];
+      return '${date.day} ${months[date.month - 1]} ${date.year}';
+    } catch (_) {
+      return dateStr;
+    }
+  }
+}
