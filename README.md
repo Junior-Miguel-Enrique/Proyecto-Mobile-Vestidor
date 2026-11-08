@@ -1,17 +1,55 @@
-# mobile
+# Vestidor Virtual - Mobile App
 
-A new Flutter project.
+Aplicación móvil multiplataforma desarrollada en **Flutter** para clientes del sistema de Vestidor Virtual y Tienda Inteligente.
 
-## Getting Started
+---
 
-This project is a starting point for a Flutter application.
+## 📱 Módulos de la Aplicación
 
-A few resources to get you started if this is your first Flutter project:
+- **Catálogo Interactivo:** Exploración de prendas, tallas, colores y disponibilidad en sucursales.
+- **Probador Virtual IA (Virtual Try-On):** Visualización interactiva de prendas sobre avatar o fotografía de usuario.
+- **Carrito y Checkout:** Pasarela de pago segura (PayPal / Tarjeta) y confirmación de pedidos.
+- **Sesiones y Soporte Offline:** Sincronización transparente de favoritos y carrito en condiciones de conectividad intermitente.
+- **Chatbot Asistente:** Asistente de moda impulsado por IA para consultas de estilo y catálogo.
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+---
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## 🛠️ Tecnologías y Dependencias
+
+- **SDK:** Flutter 3.x / Dart 3.x
+- **Gestión de Estado:** Provider / BLoC
+- **Pruebas:** Flutter Test & Integration Test
+- **Conectividad:** Cliente HTTP con soporte de reintentos y tokens JWT
+
+---
+
+## ⚙️ Requisitos Previos
+
+- Flutter SDK instalado (`flutter doctor` en verde)
+- Android Studio con SDK configurado y emulador o dispositivo físico
+- Xcode (opcional, para desarrollo en macOS / iOS)
+
+---
+
+## 🚀 Instalación y Ejecución
+
+1. **Obtener dependencias:**
+   ```bash
+   flutter pub get
+   ```
+
+2. **Ejecutar en modo depuración:**
+   ```bash
+   flutter run
+   ```
+
+3. **Ejecutar pruebas automatizadas:**
+   ```bash
+   flutter test
+   ```
+
+4. **Compilar APK de producción:**
+   ```bash
+   flutter build apk --release
+   ```
+   El archivo generado se ubica en `build/app/outputs/flutter-apk/app-release.apk`.
